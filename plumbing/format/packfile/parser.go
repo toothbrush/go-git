@@ -72,7 +72,7 @@ func NewParser(data io.Reader, opts ...ParserOption) *Parser {
 		p.lowMemoryMode = ok && lm.LowMemoryMode()
 	}
 
-	if p.scanner.seeker == nil {
+	if p.scanner.seeker == nil && p.storage == nil {
 		p.lowMemoryMode = false
 	}
 	p.scanner.lowMemoryMode = p.lowMemoryMode

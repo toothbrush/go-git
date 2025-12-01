@@ -427,7 +427,9 @@ func objectEntry(r *Scanner) (stateFn, error) {
 	} else {
 		// If data source is not io.Seeker, keep the content
 		// in the cache, so that it can be accessed by the Parser.
-		if !r.lowMemoryMode {
+		// Delta content must be kept when there's no seeker, even in
+		// lowMemoryMode, because ensureContent needs it to apply patches.
+		if !r.lowMemoryMode || r.seeker == nil {
 			oh.content = gogitsync.GetBytesBuffer()
 			_, err = oh.content.ReadFrom(r.zr.Reader)
 			if err != nil {
