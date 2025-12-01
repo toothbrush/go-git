@@ -236,7 +236,10 @@ func (p *Parser) ensureContent(oh *ObjectHeader) error {
 	}
 
 	var err error
-	if !p.lowMemoryMode && oh.content != nil && oh.content.Len() > 0 {
+	// Use existing content (delta instructions) when available.
+	// The scanner keeps delta content even in lowMemoryMode when there's
+	// no seeker (see scanner.go inflateObject), so we should use it here.
+	if oh.content != nil && oh.content.Len() > 0 {
 		source := oh.content
 		oh.content = sync.GetBytesBuffer()
 
