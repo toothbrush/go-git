@@ -32,6 +32,7 @@ var (
 type Parser struct {
 	storage       storer.EncodedObjectStorer
 	cache         *parserCache
+	offsetIndex   *offsetIndex // lightweight offset→hash index for low memory mode
 	lowMemoryMode bool
 
 	scanner   *Scanner
@@ -98,17 +99,34 @@ func (p *Parser) storeOrCache(oh *ObjectHeader) error {
 		}
 	}
 
-	if p.cache != nil {
-		o := oh
-		for p.lowMemoryMode && o.content != nil {
-			sync.PutBytesBuffer(o.content)
-			o.content = nil
-
-			if o.parent == nil || o.parent.content == nil {
-				break
+	if p.lowMemoryMode {
+		// In low memory mode, use lightweight offset index for non-delta objects
+		// and only cache delta objects (which need their content for processing)
+		if !oh.diskType.IsDelta() {
+			// Non-delta: just record offset→hash mapping
+			p.offsetIndex.Add(oh.Offset, oh.Hash)
+			// Release content buffer
+			if oh.content != nil {
+				sync.PutBytesBuffer(oh.content)
+				oh.content = nil
 			}
-			o = o.parent
+		} else {
+			// Delta: add to cache (needed for delta chain resolution)
+			if p.cache != nil {
+				// Release content after storing
+				if oh.content != nil {
+					sync.PutBytesBuffer(oh.content)
+					oh.content = nil
+				}
+				// Release parent content too
+				if oh.parent != nil && oh.parent.content != nil {
+					sync.PutBytesBuffer(oh.parent.content)
+					oh.parent.content = nil
+				}
+				p.cache.Add(oh)
+			}
 		}
+	} else if p.cache != nil {
 		p.cache.Add(oh)
 	}
 
@@ -124,7 +142,14 @@ func (p *Parser) storeOrCache(oh *ObjectHeader) error {
 }
 
 func (p *Parser) resetCache(qty int) {
-	if p.cache != nil {
+	if p.lowMemoryMode {
+		// In low memory mode, use lightweight offset index instead of full cache
+		p.offsetIndex = newOffsetIndex(qty)
+		// Still need cache for delta objects, but much smaller
+		if p.cache != nil {
+			p.cache.Reset(0) // Don't pre-allocate for all objects
+		}
+	} else if p.cache != nil {
 		p.cache.Reset(qty)
 	}
 }
@@ -243,7 +268,24 @@ func (p *Parser) processDelta(oh *ObjectHeader) error {
 	case plumbing.OFSDeltaObject:
 		pa, ok := p.cache.oiByOffset[oh.OffsetReference]
 		if !ok {
-			return plumbing.ErrObjectNotFound
+			// In low memory mode, try offset index
+			if p.lowMemoryMode && p.offsetIndex != nil {
+				hash, found := p.offsetIndex.Lookup(oh.OffsetReference)
+				if found {
+					// Create minimal placeholder that parentReader can resolve from storage
+					pa = &ObjectHeader{
+						Offset:      oh.OffsetReference,
+						Hash:        hash,
+						externalRef: true, // tells parentReader to fetch from storage
+						Type:        plumbing.AnyObject,
+						diskType:    plumbing.AnyObject,
+					}
+					ok = true
+				}
+			}
+			if !ok {
+				return plumbing.ErrObjectNotFound
+			}
 		}
 		oh.parent = pa
 
